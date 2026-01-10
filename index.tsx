@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Upload, Image as ImageIcon, Palette, Smartphone, Trash2, Monitor, Info, ZoomIn, ZoomOut, RotateCcw, Maximize, Download, Type, X, Move, GripHorizontal } from 'lucide-react';
 import html2canvas from 'html2canvas';
@@ -14,6 +14,13 @@ interface TextElement {
   align: 'left' | 'center' | 'right';
 }
 
+const EXPORT_SIZES = {
+  original: { label: 'Transparent (Phone Only)', width: 1080, height: 2340 },
+  phone: { label: 'Phone (1080x1920)', width: 1080, height: 1920 },
+  tablet7: { label: 'Tablet 7" (1200x1920)', width: 1200, height: 1920 },
+  tablet10: { label: 'Tablet 10" (1600x2560)', width: 1600, height: 2560 },
+} as const; // Define as const for better type inference
+
 const App = () => {
   const [screenImage, setScreenImage] = useState<string | null>(null);
   const [bgColor, setBgColor] = useState<string>('#e2e8f0');
@@ -21,25 +28,37 @@ const App = () => {
   const [imageZoom, setImageZoom] = useState<number>(1); // Zoom for the image inside the phone
   const [phoneZoom, setPhoneZoom] = useState<number>(1); // Zoom for the phone itself (relative to artboard now)
   const [isDownloading, setIsDownloading] = useState<boolean>(false);
-  const [exportTarget, setExportTarget] = useState<'original' | 'phone' | 'tablet7' | 'tablet10'>('phone');
+  const [exportTarget, setExportTarget] = useState<keyof typeof EXPORT_SIZES>('phone');
+
+  // Phone Position State
+  const [phonePos, setPhonePos] = useState<{ x: number, y: number } | null>(null); // Null means centered default initially
 
   // Text State
   const [texts, setTexts] = useState<TextElement[]>([]);
   const [selectedTextId, setSelectedTextId] = useState<string | null>(null);
-  const [viewScale, setViewScale] = useState<number>(0.4); // Scale of the artboard in the viewport
+
+  // View State
+  const [viewScale, setViewScale] = useState<number>(0.4);
+  const [guides, setGuides] = useState<{ x: boolean, y: boolean }>({ x: false, y: false });
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const captureRef = useRef<HTMLDivElement>(null);
-  const dragItem = useRef<{ id: string, startX: number, startY: number } | null>(null);
-
-  const EXPORT_SIZES = {
-    original: { label: 'Transparent (Phone Only)', width: 1080, height: 2340 }, // Defaulting original to a large canvas too for consistency in this new mode, or handling separately logic
-    phone: { label: 'Phone (1080x1920)', width: 1080, height: 1920 },
-    tablet7: { label: 'Tablet 7" (1200x1920)', width: 1200, height: 1920 },
-    tablet10: { label: 'Tablet 10" (1600x2560)', width: 1600, height: 2560 },
-  };
+  const dragItem = useRef<{
+    type: 'text' | 'phone';
+    id?: string;
+    startX: number;
+    startY: number;
+    initialX: number;
+    initialY: number;
+  } | null>(null);
 
   const currentSize = EXPORT_SIZES[exportTarget];
+
+  // Initialize phone position when size changes if not set
+  useEffect(() => {
+    // Force reset to center when target changes to ensure correct alignment
+    setPhonePos({ x: currentSize.width / 2, y: currentSize.height / 2 });
+  }, [exportTarget]); // Depend specifically on exportTarget changing
 
   // Text Handlers
   const addText = (type: 'heading' | 'body') => {
@@ -71,22 +90,75 @@ const App = () => {
     setSelectedTextId(id);
     const text = texts.find(t => t.id === id);
     if (text) {
-      dragItem.current = { id, startX: e.clientX - text.x * viewScale, startY: e.clientY - text.y * viewScale };
+      dragItem.current = {
+        type: 'text',
+        id,
+        startX: e.clientX,
+        startY: e.clientY,
+        initialX: text.x,
+        initialY: text.y
+      };
+    }
+  };
+
+  const handlePhoneDragStart = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    e.preventDefault();
+    if (phonePos) {
+      dragItem.current = {
+        type: 'phone',
+        startX: e.clientX,
+        startY: e.clientY,
+        initialX: phonePos.x,
+        initialY: phonePos.y
+      };
     }
   };
 
   const handleGlobalMouseMove = (e: React.MouseEvent) => {
-    if (dragItem.current) {
-      const { id, startX, startY } = dragItem.current;
-      // Calculate new unscaled position
-      const newX = (e.clientX - startX) / viewScale;
-      const newY = (e.clientY - startY) / viewScale;
+    if (!dragItem.current) return;
+
+    const { type, id, startX, startY, initialX, initialY } = dragItem.current;
+
+    // Calculate raw delta scaled by view
+    const deltaX = (e.clientX - startX) / viewScale;
+    const deltaY = (e.clientY - startY) / viewScale;
+
+    let newX = initialX + deltaX;
+    let newY = initialY + deltaY;
+
+    // Snapping Logic
+    const SNAP_THRESHOLD = 15;
+    const centerX = currentSize.width / 2;
+    const centerY = currentSize.height / 2;
+
+    let snapX = false;
+    let snapY = false;
+
+    // Snap X (Center)
+    if (Math.abs(newX - centerX) < SNAP_THRESHOLD) {
+      newX = centerX;
+      snapX = true;
+    }
+
+    // Snap Y (Center)
+    if (Math.abs(newY - centerY) < SNAP_THRESHOLD) {
+      newY = centerY;
+      snapY = true;
+    }
+
+    setGuides({ x: snapX, y: snapY });
+
+    if (type === 'text' && id) {
       updateText(id, { x: newX, y: newY });
+    } else if (type === 'phone') {
+      setPhonePos({ x: newX, y: newY });
     }
   };
 
   const handleGlobalMouseUp = () => {
     dragItem.current = null;
+    setGuides({ x: false, y: false });
   };
 
   // Handle Download (High Res Fix)
@@ -202,9 +274,9 @@ const App = () => {
       <div className="w-80 flex-shrink-0 border-r border-slate-200 bg-white flex flex-col z-20 shadow-lg relative">
         <div className="p-6 border-b border-slate-100">
           <h1 className="text-2xl font-bold bg-gradient-to-r from-blue-600 to-indigo-600 bg-clip-text text-transparent flex items-center gap-2">
-            <Smartphone className="text-blue-600" /> MockupPro
+            <Smartphone className="text-blue-600" /> omer
           </h1>
-          <p className="text-xs text-slate-400 mt-1">HD iPhone Mockup Generator</p>
+          <p className="text-xs text-slate-400 mt-1">mockup generator for aso</p>
         </div>
 
         <div className="flex-1 overflow-y-auto p-6 space-y-8">
@@ -452,24 +524,59 @@ const App = () => {
               <span className="text-[10px] w-8">{Math.round(phoneZoom * 100)}%</span>
             </div>
           </div>
+
+          {/* Manual Center Button */}
+          <button
+            onClick={() => setPhonePos({ x: currentSize.width / 2, y: currentSize.height / 2 })}
+            className="bg-white/90 backdrop-blur-md shadow-xl border border-white/20 p-3 rounded-xl flex items-center gap-2 hover:bg-slate-50 transition-colors text-slate-600 text-xs font-semibold uppercase"
+          >
+            <Move className="w-4 h-4" />
+            Center Phone
+          </button>
         </div>
 
         {/* ARTBOARD - The actual exportable area */}
         <div
-          className="shadow-2xl relative transition-transform duration-75 easelinear origin-center"
+          className="shadow-2xl relative origin-center"
           style={{
             width: currentSize.width,
             height: currentSize.height,
             transform: `scale(${viewScale})`,
             backgroundColor: bgColor,
+            transition: 'transform 0.05s linear, background-color 0.5s ease-in-out'
           }}
         >
           {/* Capture Target Wrapper - Matches Artboard Size */}
-          <div ref={captureRef} className="w-full h-full relative overflow-hidden" style={{ backgroundColor: bgColor }}>
+          <div
+            ref={captureRef}
+            className="w-full h-full relative overflow-hidden"
+            style={{
+              backgroundColor: bgColor,
+              transition: 'background-color 0.5s ease-in-out'
+            }}
+          >
+
+            {/* Guides */}
+            {guides.x && (
+              <div className="absolute top-0 bottom-0 left-1/2 w-px bg-red-500 z-50 pointer-events-none border-l border-dashed border-red-500 opacity-70"></div>
+            )}
+            {guides.y && (
+              <div className="absolute left-0 right-0 top-1/2 h-px bg-red-500 z-50 pointer-events-none border-t border-dashed border-red-500 opacity-70"></div>
+            )}
 
             {/* Center Content (Phone) */}
-            <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-              <div style={{ transform: `scale(${phoneZoom})`, pointerEvents: 'auto' }}>
+            <div
+              className="absolute flex items-center justify-center cursor-move"
+              style={{
+                left: phonePos?.x || currentSize.width / 2,
+                top: phonePos?.y || currentSize.height / 2,
+                transform: 'translate(-50%, -50%) scale(' + phoneZoom + ')', // Application of position + zoom
+                zIndex: 10
+              }}
+              onMouseDown={handlePhoneDragStart}
+            >
+              {/* Prevent default drag behavior of images inside */}
+              <div className="pointer-events-none">
                 <IPhone15Pro>
                   {screenImage ? (
                     <img
@@ -513,7 +620,8 @@ const App = () => {
                     fontWeight: text.fontWeight,
                     textAlign: text.align,
                     whiteSpace: 'pre-wrap',
-                    maxWidth: '80%'
+                    width: 'max-content',
+                    maxWidth: '300%'
                   }}
                 >
                   {text.text}
