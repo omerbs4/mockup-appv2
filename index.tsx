@@ -14,6 +14,16 @@ interface TextElement {
   align: 'left' | 'center' | 'right';
 }
 
+interface ImageElement {
+  id: string;
+  src: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  aspectRatio: number;
+}
+
 const EXPORT_SIZES = {
   original: { label: 'Transparent (Phone Only)', width: 1080, height: 2340 },
   phone: { label: 'Phone (1080x1920)', width: 1080, height: 1920 },
@@ -23,7 +33,13 @@ const EXPORT_SIZES = {
 
 const App = () => {
   const [screenImage, setScreenImage] = useState<string | null>(null);
+  const [bgType, setBgType] = useState<'solid' | 'gradient'>('solid');
   const [bgColor, setBgColor] = useState<string>('#e2e8f0');
+  const [gradientColor1, setGradientColor1] = useState<string>('#e2e8f0');
+  const [gradientColor2, setGradientColor2] = useState<string>('#cbd5e1');
+  const [gradientDirection, setGradientDirection] = useState<string>('to bottom');
+  const [bgImage, setBgImage] = useState<string | null>(null);
+  const [bgZoom, setBgZoom] = useState<number>(100);
   const [fitMode, setFitMode] = useState<'cover' | 'contain'>('cover');
   const [imageZoom, setImageZoom] = useState<number>(1); // Zoom for the image inside the phone
   const [phoneZoom, setPhoneZoom] = useState<number>(1); // Zoom for the phone itself (relative to artboard now)
@@ -37,14 +53,21 @@ const App = () => {
   const [texts, setTexts] = useState<TextElement[]>([]);
   const [selectedTextId, setSelectedTextId] = useState<string | null>(null);
 
+  // Asset/Image State
+  const [images, setImages] = useState<ImageElement[]>([]);
+  const [selectedImageId, setSelectedImageId] = useState<string | null>(null);
+
   // View State
   const [viewScale, setViewScale] = useState<number>(0.4);
   const [guides, setGuides] = useState<{ x: boolean, y: boolean }>({ x: false, y: false });
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const assetInputRef = useRef<HTMLInputElement>(null);
+  const bgImageInputRef = useRef<HTMLInputElement>(null);
   const captureRef = useRef<HTMLDivElement>(null);
+  const phoneRef = useRef<HTMLDivElement>(null);
   const dragItem = useRef<{
-    type: 'text' | 'phone';
+    type: 'text' | 'phone' | 'image';
     id?: string;
     startX: number;
     startY: number;
@@ -85,9 +108,83 @@ const App = () => {
     if (selectedTextId === id) setSelectedTextId(null);
   };
 
+  const deleteImage = (id: string) => {
+    setImages(images.filter(i => i.id !== id));
+    if (selectedImageId === id) setSelectedImageId(null);
+  };
+
+  const handleBgImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file && file.type.startsWith('image/')) {
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        setBgImage(event.target?.result as string);
+      };
+      reader.readAsDataURL(file);
+    }
+    if (bgImageInputRef.current) bgImageInputRef.current.value = '';
+  };
+
+  // Asset Handlers
+  const handleAssetUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file && file.type.startsWith('image/')) {
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        const src = event.target?.result as string;
+        // Create a temporary image to get natural dimensions
+        const img = new Image();
+        img.onload = () => {
+          const aspect = img.width / img.height;
+          // Default scale: fairly small, maybe 200px wide
+          const defaultWidth = 200;
+          const defaultHeight = defaultWidth / aspect;
+
+          const newImage: ImageElement = {
+            id: Date.now().toString(),
+            src,
+            x: currentSize.width / 2,
+            y: currentSize.height / 2,
+            width: defaultWidth,
+            height: defaultHeight,
+            aspectRatio: aspect
+          };
+          setImages([...images, newImage]);
+          setSelectedImageId(newImage.id);
+        };
+        img.src = src;
+      };
+      reader.readAsDataURL(file);
+    }
+    // Reset input
+    if (assetInputRef.current) assetInputRef.current.value = '';
+  };
+
+  const handleImageDragStart = (e: React.MouseEvent, id: string) => {
+    e.stopPropagation();
+    setSelectedImageId(id);
+    setSelectedTextId(null); // Mutually exclusive selection
+    const img = images.find(i => i.id === id);
+    if (img) {
+      dragItem.current = {
+        type: 'image',
+        id,
+        startX: e.clientX,
+        startY: e.clientY,
+        initialX: img.x,
+        initialY: img.y
+      };
+    }
+  };
+
+  const updateImage = (id: string, updates: Partial<ImageElement>) => {
+    setImages(images.map(i => i.id === id ? { ...i, ...updates } : i));
+  };
+
   const handleTextDragStart = (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
     setSelectedTextId(id);
+    setSelectedImageId(null); // Mutually exclusive
     const text = texts.find(t => t.id === id);
     if (text) {
       dragItem.current = {
@@ -104,6 +201,8 @@ const App = () => {
   const handlePhoneDragStart = (e: React.MouseEvent) => {
     e.stopPropagation();
     e.preventDefault();
+    setSelectedTextId(null);
+    setSelectedImageId(null);
     if (phonePos) {
       dragItem.current = {
         type: 'phone',
@@ -153,6 +252,8 @@ const App = () => {
       updateText(id, { x: newX, y: newY });
     } else if (type === 'phone') {
       setPhonePos({ x: newX, y: newY });
+    } else if (type === 'image' && id) {
+      updateImage(id, { x: newX, y: newY });
     }
   };
 
@@ -166,47 +267,46 @@ const App = () => {
     if (!captureRef.current) return;
     setIsDownloading(true);
     setSelectedTextId(null); // Deselect
+    setSelectedImageId(null); // Deselect image too
 
     await new Promise(r => setTimeout(r, 100)); // Wait for UI update
 
     try {
-      // 1. Clone the Artboard
-      // We clone the *inner* content, but we need to ensure it's rendered at full 100% scale
-      // decoupled from the "viewScale" of the preview.
-
-      const originalElement = captureRef.current;
+      const isPhoneOnly = exportTarget === 'original';
+      const originalElement = isPhoneOnly ? (phoneRef.current || captureRef.current) : captureRef.current;
+      
       const clone = originalElement.cloneNode(true) as HTMLElement;
 
       // 2. Setup a hidden container for the clone
-      // We place it off-screen but ensure it's visible to the rendering engine
       const container = document.createElement('div');
       container.style.position = 'fixed';
       container.style.top = '-10000px';
       container.style.left = '-10000px';
-      container.style.width = `${currentSize.width}px`;
-      container.style.height = `${currentSize.height}px`;
+      if (!isPhoneOnly) {
+        container.style.width = `${currentSize.width}px`;
+        container.style.height = `${currentSize.height}px`;
+      }
       container.style.zIndex = '-9999';
-      container.style.overflow = 'hidden';
-      // Ensure the container itself isn't scaled
+      // Do not use overflow hidden for phone only so shadows aren't clipped
+      if (!isPhoneOnly) container.style.overflow = 'hidden';
       container.style.transform = 'none';
 
-      // Append clone
       container.appendChild(clone);
       document.body.appendChild(container);
 
       // 3. Capture the clone
-      // Since 'container' is unscaled and sized correctly, html2canvas will see the full pixels.
       const canvas = await html2canvas(clone, {
-        scale: 1, // 1 CSS pixel = 1 Output pixel (since we forced size 1080px etc)
-        width: currentSize.width,
-        height: currentSize.height,
+        scale: isPhoneOnly ? 3 : 1, // 3x scale gives ~1080x2340 for the phone wrapper
+        width: isPhoneOnly ? undefined : currentSize.width,
+        height: isPhoneOnly ? undefined : currentSize.height,
         useCORS: true,
         backgroundColor: null,
         logging: false,
         allowTaint: true,
-        // Fix for text offset issues sometimes seen
         onclone: (clonedDoc, element) => {
-          // Ensure local fonts or styles are applied if needed, usually auto-handled
+          if (isPhoneOnly) {
+            element.style.background = 'transparent';
+          }
         }
       });
 
@@ -370,33 +470,51 @@ const App = () => {
               </button>
             </div>
 
-            {/* Selected Text Controls */}
-            {selectedTextId && (
+          </div>
+
+          {/* Section: Assets */}
+          <div className="space-y-3 pt-2 border-t border-slate-50">
+            <h2 className="text-sm font-semibold text-slate-900 uppercase tracking-wider">Varlıklar (Assets)</h2>
+            <button
+              onClick={() => assetInputRef.current?.click()}
+              className="w-full py-3 border-2 border-dashed border-slate-200 rounded-xl hover:border-blue-400 hover:bg-blue-50 text-slate-500 hover:text-blue-600 transition-colors flex items-center justify-center gap-2"
+            >
+              <ImageIcon className="w-4 h-4" />
+              <span className="text-xs font-medium">Add Image / Logo</span>
+            </button>
+            <input
+              type="file"
+              ref={assetInputRef}
+              onChange={handleAssetUpload}
+              accept="image/png, image/jpeg, image/svg+xml"
+              className="hidden"
+            />
+
+            {/* Selected Image Controls */}
+            {selectedImageId && (
               <div className="p-3 bg-blue-50/50 border border-blue-100 rounded-xl space-y-3 animate-in fade-in slide-in-from-left-2">
                 <div className="flex justify-between items-center text-xs text-blue-800 font-semibold uppercase">
-                  <span>Edit Text</span>
-                  <button onClick={() => deleteText(selectedTextId)} className="text-red-500 hover:bg-red-100 p-1 rounded"><Trash2 className="w-3 h-3" /></button>
+                  <span>Edit Asset</span>
+                  <button onClick={() => deleteImage(selectedImageId)} className="text-red-500 hover:bg-red-100 p-1 rounded"><Trash2 className="w-3 h-3" /></button>
                 </div>
                 {(() => {
-                  const txt = texts.find(t => t.id === selectedTextId);
-                  if (!txt) return null;
+                  const img = images.find(i => i.id === selectedImageId);
+                  if (!img) return null;
                   return (
                     <div className="space-y-2">
-                      <input
-                        type="text"
-                        value={txt.text}
-                        onChange={(e) => updateText(txt.id, { text: e.target.value })}
-                        className="w-full text-xs p-2 border border-blue-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500/30"
-                      />
-                      <div className="flex gap-2">
-                        <input type="color" value={txt.color} onChange={(e) => updateText(txt.id, { color: e.target.value })} className="w-8 h-8 rounded cursor-pointer border-0 p-0" />
+                      <div className="flex items-center justify-between text-xs text-slate-500">
+                        <span>Scale: {Math.round(img.width)}px</span>
                         <input
-                          type="number"
-                          value={txt.fontSize}
-                          onChange={(e) => updateText(txt.id, { fontSize: parseInt(e.target.value) })}
-                          className="w-16 text-xs p-2 border border-blue-200 rounded-lg"
+                          type="range"
+                          min="20"
+                          max={currentSize.width}
+                          value={img.width}
+                          onChange={(e) => {
+                            const w = parseFloat(e.target.value);
+                            updateImage(img.id, { width: w, height: w / img.aspectRatio });
+                          }}
+                          className="w-24 h-1 bg-blue-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
                         />
-                        <button onClick={() => updateText(txt.id, { fontWeight: txt.fontWeight === 'bold' ? 'normal' : 'bold' })} className={`px-2 rounded border border-blue-200 text-xs font-bold ${txt.fontWeight === 'bold' ? 'bg-blue-200' : 'bg-white'}`}>B</button>
                       </div>
                     </div>
                   )
@@ -405,29 +523,185 @@ const App = () => {
             )}
           </div>
 
+          {/* Selected Text Controls */}
+          {selectedTextId && (
+            <div className="p-3 bg-blue-50/50 border border-blue-100 rounded-xl space-y-3 animate-in fade-in slide-in-from-left-2">
+              <div className="flex justify-between items-center text-xs text-blue-800 font-semibold uppercase">
+                <span>Edit Text</span>
+                <button onClick={() => deleteText(selectedTextId)} className="text-red-500 hover:bg-red-100 p-1 rounded"><Trash2 className="w-3 h-3" /></button>
+              </div>
+              {(() => {
+                const txt = texts.find(t => t.id === selectedTextId);
+                if (!txt) return null;
+                return (
+                  <div className="space-y-2">
+                    <input
+                      type="text"
+                      value={txt.text}
+                      onChange={(e) => updateText(txt.id, { text: e.target.value })}
+                      className="w-full text-xs p-2 border border-blue-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500/30"
+                    />
+                    <div className="flex gap-2">
+                      <input type="color" value={txt.color} onChange={(e) => updateText(txt.id, { color: e.target.value })} className="w-8 h-8 rounded cursor-pointer border-0 p-0" />
+                      <input
+                        type="number"
+                        value={txt.fontSize}
+                        onChange={(e) => updateText(txt.id, { fontSize: parseInt(e.target.value) })}
+                        className="w-16 text-xs p-2 border border-blue-200 rounded-lg"
+                      />
+                      <button onClick={() => updateText(txt.id, { fontWeight: txt.fontWeight === 'bold' ? 'normal' : 'bold' })} className={`px-2 rounded border border-blue-200 text-xs font-bold ${txt.fontWeight === 'bold' ? 'bg-blue-200' : 'bg-white'}`}>B</button>
+                    </div>
+                  </div>
+                )
+              })()}
+            </div>
+          )}
+
+
           {/* Section: Background */}
           <div className="space-y-3">
             <h2 className="text-sm font-semibold text-slate-900 uppercase tracking-wider">Arka Plan (Background)</h2>
-            <div className="flex items-center gap-3">
-              <div className="relative w-full">
-                <input
-                  type="color"
-                  value={bgColor}
-                  onChange={(e) => setBgColor(e.target.value)}
-                  className="absolute inset-0 opacity-0 w-full h-full cursor-pointer"
-                />
-                <div className="flex items-center gap-3 p-3 border border-slate-200 rounded-xl bg-white shadow-sm cursor-pointer hover:border-blue-400 transition-colors">
-                  <div
-                    className="w-10 h-10 rounded-full shadow-inner border border-black/10"
-                    style={{ backgroundColor: bgColor }}
+            
+            {/* Solid vs Gradient Toggle */}
+            <div className="flex bg-slate-100 p-1 rounded-lg">
+              <button
+                onClick={() => setBgType('solid')}
+                className={`flex-1 text-xs py-1.5 font-medium rounded-md transition-all ${bgType === 'solid' ? 'bg-white shadow text-blue-600' : 'text-slate-500 hover:text-slate-700'}`}
+              >
+                Solid Color
+              </button>
+              <button
+                onClick={() => setBgType('gradient')}
+                className={`flex-1 text-xs py-1.5 font-medium rounded-md transition-all ${bgType === 'gradient' ? 'bg-white shadow text-blue-600' : 'text-slate-500 hover:text-slate-700'}`}
+              >
+                Gradient
+              </button>
+            </div>
+
+            {bgType === 'solid' ? (
+              <div className="flex items-center gap-3">
+                <div className="relative w-full">
+                  <input
+                    type="color"
+                    value={bgColor}
+                    onChange={(e) => setBgColor(e.target.value)}
+                    className="absolute inset-0 opacity-0 w-full h-full cursor-pointer"
                   />
-                  <div className="flex flex-col">
-                    <span className="text-sm font-medium text-slate-700">Pick Color</span>
-                    <span className="text-xs text-slate-400 font-mono uppercase">{bgColor}</span>
+                  <div className="flex items-center gap-3 p-3 border border-slate-200 rounded-xl bg-white shadow-sm cursor-pointer hover:border-blue-400 transition-colors">
+                    <div
+                      className="w-10 h-10 rounded-full shadow-inner border border-black/10"
+                      style={{ backgroundColor: bgColor }}
+                    />
+                    <div className="flex flex-col">
+                      <span className="text-sm font-medium text-slate-700">Pick Color</span>
+                      <span className="text-xs text-slate-400 font-mono uppercase">{bgColor}</span>
+                    </div>
+                    <Palette className="w-5 h-5 text-slate-400 ml-auto" />
                   </div>
-                  <Palette className="w-5 h-5 text-slate-400 ml-auto" />
                 </div>
               </div>
+            ) : (
+              <div className="space-y-3 animate-in fade-in slide-in-from-top-2">
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="relative w-full">
+                    <input
+                      type="color"
+                      value={gradientColor1}
+                      onChange={(e) => setGradientColor1(e.target.value)}
+                      className="absolute inset-0 opacity-0 w-full h-full cursor-pointer"
+                    />
+                    <div className="flex items-center gap-2 p-2 border border-slate-200 rounded-lg bg-white shadow-sm cursor-pointer hover:border-blue-400">
+                      <div className="w-6 h-6 rounded border border-black/10" style={{ backgroundColor: gradientColor1 }} />
+                      <span className="text-xs text-slate-600 uppercase font-mono">{gradientColor1}</span>
+                    </div>
+                  </div>
+                  <div className="relative w-full">
+                    <input
+                      type="color"
+                      value={gradientColor2}
+                      onChange={(e) => setGradientColor2(e.target.value)}
+                      className="absolute inset-0 opacity-0 w-full h-full cursor-pointer"
+                    />
+                    <div className="flex items-center gap-2 p-2 border border-slate-200 rounded-lg bg-white shadow-sm cursor-pointer hover:border-blue-400">
+                      <div className="w-6 h-6 rounded border border-black/10" style={{ backgroundColor: gradientColor2 }} />
+                      <span className="text-xs text-slate-600 uppercase font-mono">{gradientColor2}</span>
+                    </div>
+                  </div>
+                </div>
+                <div>
+                  <label className="text-xs text-slate-500 font-medium block mb-1">Gradient Direction</label>
+                  <select
+                    value={gradientDirection}
+                    onChange={(e) => setGradientDirection(e.target.value)}
+                    className="w-full text-xs p-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500/30 text-slate-700"
+                  >
+                    <option value="to bottom">⬇️ Top to Bottom</option>
+                    <option value="to top">⬆️ Bottom to Top</option>
+                    <option value="to right">➡️ Left to Right</option>
+                    <option value="to left">⬅️ Right to Left</option>
+                    <option value="to bottom right">↘️ Top-Left to Bottom-Right</option>
+                    <option value="to top right">↗️ Bottom-Left to Top-Right</option>
+                  </select>
+                </div>
+              </div>
+            )}
+
+            <div className="pt-2 space-y-3">
+              <button
+                onClick={() => bgImageInputRef.current?.click()}
+                className="w-full py-3 border-2 border-dashed border-slate-200 rounded-xl hover:border-blue-400 hover:bg-blue-50 text-slate-500 hover:text-blue-600 transition-colors flex items-center justify-center gap-2"
+              >
+                <ImageIcon className="w-4 h-4" />
+                <span className="text-xs font-medium">{bgImage ? 'Change Background Image' : 'Upload Background Image'}</span>
+              </button>
+              <input
+                type="file"
+                ref={bgImageInputRef}
+                onChange={handleBgImageUpload}
+                accept="image/*"
+                className="hidden"
+              />
+              {bgImage && (
+                <div className="space-y-3 animate-in fade-in slide-in-from-top-2">
+                  <div className="pt-2 border-t border-slate-100 mt-2 space-y-2">
+                    <div className="flex justify-between items-center text-xs text-slate-500 font-medium">
+                      <div className="flex items-center gap-1">
+                        <ZoomIn className="w-3 h-3" />
+                        <span>Background Scale</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span>{bgZoom}%</span>
+                        <button onClick={() => setBgZoom(100)} className="hover:text-blue-600 transition-colors" title="Reset Scale">
+                          <RotateCcw className="w-3 h-3" />
+                        </button>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <ZoomOut className="w-3 h-3 text-slate-400" />
+                      <input
+                        type="range"
+                        min="10"
+                        max="200"
+                        step="1"
+                        value={bgZoom}
+                        onChange={(e) => setBgZoom(parseInt(e.target.value))}
+                        className="flex-1 h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500/30"
+                      />
+                      <ZoomIn className="w-3 h-3 text-slate-400" />
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => {
+                      setBgImage(null);
+                      setBgZoom(100);
+                    }}
+                    className="w-full py-2 text-xs text-red-500 hover:bg-red-50 rounded-lg transition-colors flex items-center justify-center gap-2 border border-red-100"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                    Remove Background Image
+                  </button>
+                </div>
+              )}
             </div>
           </div>
 
@@ -542,7 +816,8 @@ const App = () => {
             width: currentSize.width,
             height: currentSize.height,
             transform: `scale(${viewScale})`,
-            backgroundColor: bgColor,
+            backgroundColor: bgType === 'solid' ? bgColor : undefined,
+            backgroundImage: bgType === 'gradient' ? `linear-gradient(${gradientDirection}, ${gradientColor1}, ${gradientColor2})` : undefined,
             transition: 'transform 0.05s linear, background-color 0.5s ease-in-out'
           }}
         >
@@ -551,7 +826,11 @@ const App = () => {
             ref={captureRef}
             className="w-full h-full relative overflow-hidden"
             style={{
-              backgroundColor: bgColor,
+              backgroundColor: bgType === 'solid' ? bgColor : undefined,
+              backgroundImage: bgImage ? `url(${bgImage})` : (bgType === 'gradient' ? `linear-gradient(${gradientDirection}, ${gradientColor1}, ${gradientColor2})` : 'none'),
+              backgroundSize: bgImage ? `${bgZoom}%` : 'cover',
+              backgroundPosition: 'center',
+              backgroundRepeat: bgImage ? 'repeat' : 'no-repeat',
               transition: 'background-color 0.5s ease-in-out'
             }}
           >
@@ -576,7 +855,7 @@ const App = () => {
               onMouseDown={handlePhoneDragStart}
             >
               {/* Prevent default drag behavior of images inside */}
-              <div className="pointer-events-none">
+              <div ref={phoneRef} className="pointer-events-none">
                 <IPhone15Pro>
                   {screenImage ? (
                     <img
@@ -602,6 +881,35 @@ const App = () => {
                   )}
                 </IPhone15Pro>
               </div>
+            </div>
+
+            {/* Image Layer */}
+            <div className="absolute inset-0 z-15 pointer-events-none">
+              {images.map(img => (
+                <div
+                  key={img.id}
+                  onMouseDown={(e) => handleImageDragStart(e, img.id)}
+                  className={`absolute cursor-move pointer-events-auto select-none group`}
+                  style={{
+                    left: img.x,
+                    top: img.y,
+                    width: img.width,
+                    height: img.height,
+                    transform: 'translate(-50%, -50%)',
+                  }}
+                >
+                  <img
+                    src={img.src}
+                    alt="asset"
+                    className={`w-full h-full object-contain ${selectedImageId === img.id ? 'ring-2 ring-blue-500 ring-offset-2' : ''}`}
+                    draggable={false}
+                  />
+                  {/* Hover Border if not selected */}
+                  {selectedImageId !== img.id && (
+                    <div className="absolute inset-0 border border-blue-300 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none rounded"></div>
+                  )}
+                </div>
+              ))}
             </div>
 
             {/* Text Layer */}
@@ -633,7 +941,7 @@ const App = () => {
         </div>
 
       </div>
-    </div>
+    </div >
   );
 };
 
